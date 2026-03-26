@@ -279,9 +279,11 @@ async function initSlots(){
           if(o.date===dateStr && !orders.some(ex=>String(ex.id)===String(o.id))){
             const qty=o.items.reduce((s,i)=>s+i.qty,0);
             if(slots[o.pickup_time])slots[o.pickup_time].count+=qty;
-            orders.push({id:o.id,name:o.name,phone:o.phone,time:o.pickup_time,done:o.done,source:o.source,items:o.items});
+            orders.push({id:o.id,name:o.name,phone:o.phone,time:o.pickup_time,done:o.done,source:o.source,items:o.items,notes:o.notes});
             renderPizzerPanel();
-            showAlert(`${o.name} — ${qty} szt o ${o.pickup_time}: ${o.items.map(i=>`${i.qty}x${i.name}`).join(', ')}`);
+            const otype=detectOrderType(o.items);
+            const typeLabel=otype==='breakfast'?'☀️ ':otype==='mixed'?'🍕☀️ ':'🍕 ';
+            showAlert(`${typeLabel}${o.name} — ${qty} szt o ${o.pickup_time}: ${o.items.map(i=>`${i.qty}x${i.name}`).join(', ')}`, otype);
           }
         }
       )
@@ -297,13 +299,15 @@ async function initSlots(){
         const existingIds=new Set(orders.map(o=>String(o.id)));
         const freshOrders=newOrders.filter(o=>!existingIds.has(String(o.id)));
         if(freshOrders.length>0){
+          let lastType='pizza';
           freshOrders.forEach(o=>{
             const qty=o.items.reduce((s,i)=>s+i.qty,0);
             if(slots[o.pickup_time])slots[o.pickup_time].count+=qty;
-            orders.push({id:o.id,name:o.name,phone:o.phone,time:o.pickup_time,done:o.done,source:o.source,items:o.items});
+            orders.push({id:o.id,name:o.name,phone:o.phone,time:o.pickup_time,done:o.done,source:o.source,items:o.items,notes:o.notes});
+            lastType=detectOrderType(o.items);
           });
           renderPizzerPanel();
-          showAlert(`${freshOrders.length} nowe zamowienie!`);
+          showAlert(`${freshOrders.length} nowe zamówienie!`, lastType);
         }
       }
     }, 15000);
@@ -347,13 +351,15 @@ function renderOrders(){
   list.innerHTML='';
   [...orders].sort((a,b)=>a.time.localeCompare(b.time)).forEach(o=>{
     const tq=o.items.reduce((s,i)=>s+i.qty,0),tp=o.items.reduce((s,i)=>s+i.qty*i.price,0);
+    const otype=detectOrderType(o.items);
+    const typeIcon=otype==='breakfast'?'☀️':otype==='mixed'?'🍕☀️':'🍕';
     const c=document.createElement('div');c.className=`order-card ${o.done?'done':''}`;
     c.innerHTML=`<div class="order-top">
       <div class="order-time-badge">${o.time}</div>
       <div class="order-info"><div class="order-name">${o.name}</div><div class="order-detail">${o.phone}${tp?' · '+tp.toFixed(2)+' PLN':''}</div></div>
-      <div class="order-pizza-count">${tq}🍕</div>
+      <div class="order-pizza-count">${tq}${typeIcon}</div>
       ${!o.done?`<button class="btn-done" onclick="markDone('${o.id}')">✓ Gotowe</button>`:'<div style="font-size:.7rem;color:var(--sage);font-family:\'DM Mono\'">✓ wydano</div>'}
-    </div><div class="order-items">${o.items.map(i=>`<span class="order-item-tag">${i.qty}× ${i.name}</span>`).join('')}</div>`;
+    </div><div class="order-items">${o.items.map(i=>`<span class="order-item-tag">${i.qty}× ${i.name}</span>`).join('')}</div>${o.notes?`<div style="font-size:.72rem;color:#C4391A;margin-top:.3rem;padding:.3rem .5rem;background:#FFF3F0;border-radius:6px">📝 ${o.notes}</div>`:''}`;
     list.appendChild(c);
   });
 }
@@ -374,11 +380,14 @@ async function markDone(id){
   renderOrders();
 }
 
-// Dźwięk — GŁOŚNY ALARM dla pizzera
+// Dźwięk — TYLKO U PIZZERA (głośny, powtarzalny alarm)
 let audioCtx=null;
 function ensureAudio(){if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();if(audioCtx.state==='suspended')audioCtx.resume();return audioCtx;}
+// Odblokuj AudioContext przy pierwszej interakcji
 ['click','touchstart','keydown'].forEach(ev=>document.addEventListener(ev,()=>ensureAudio(),{once:true}));
-function playOrderSound(){
+
+// 🍕 Dźwięk PIZZA — szybki, ostry alarm (square wave)
+function playPizzaSound(){
   try{
     const ctx=ensureAudio();
     for(let r=0;r<3;r++){
@@ -387,19 +396,73 @@ function playOrderSound(){
         const osc=ctx.createOscillator(),gain=ctx.createGain();
         osc.connect(gain);gain.connect(ctx.destination);
         osc.type='square';osc.frequency.value=freq;
-        gain.gain.setValueAtTime(0,ctx.currentTime+offset+i*0.12);
-        gain.gain.linearRampToValueAtTime(0.6,ctx.currentTime+offset+i*0.12+0.02);
-        gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+offset+i*0.12+0.3);
-        osc.start(ctx.currentTime+offset+i*0.12);
-        osc.stop(ctx.currentTime+offset+i*0.12+0.3);
+        gain.gain.setValueAtTime(0,ctx.currentTime+offset+i*.1);
+        gain.gain.linearRampToValueAtTime(.6,ctx.currentTime+offset+i*.1+.01);
+        gain.gain.setValueAtTime(.6,ctx.currentTime+offset+i*.1+.08);
+        gain.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+offset+i*.1+.12);
+        osc.start(ctx.currentTime+offset+i*.1);
+        osc.stop(ctx.currentTime+offset+i*.1+.15);
       });
     }
   }catch(e){console.warn('Audio error:',e)}
 }
-function showAlert(text){
+// ☀️ Dźwięk ŚNIADANIE — delikatniejszy, melodyjny (sine wave, wyższe tony)
+function playBreakfastSound(){
+  try{
+    const ctx=ensureAudio();
+    for(let r=0;r<2;r++){
+      const offset=r*0.8;
+      [523,659,784,1047].forEach((freq,i)=>{
+        const osc=ctx.createOscillator(),gain=ctx.createGain();
+        osc.connect(gain);gain.connect(ctx.destination);
+        osc.type='sine';osc.frequency.value=freq;
+        gain.gain.setValueAtTime(0,ctx.currentTime+offset+i*.15);
+        gain.gain.linearRampToValueAtTime(.5,ctx.currentTime+offset+i*.15+.03);
+        gain.gain.setValueAtTime(.5,ctx.currentTime+offset+i*.15+.12);
+        gain.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+offset+i*.15+.25);
+        osc.start(ctx.currentTime+offset+i*.15);
+        osc.stop(ctx.currentTime+offset+i*.15+.3);
+      });
+    }
+  }catch(e){console.warn('Audio error:',e)}
+}
+// 🍕☀️ Dźwięk MIESZANY — pizza + śniadanie razem (sawtooth, unikalny)
+function playMixedSound(){
+  try{
+    const ctx=ensureAudio();
+    for(let r=0;r<3;r++){
+      const offset=r*0.7;
+      [660,880,660,1100,880].forEach((freq,i)=>{
+        const osc=ctx.createOscillator(),gain=ctx.createGain();
+        osc.connect(gain);gain.connect(ctx.destination);
+        osc.type='sawtooth';osc.frequency.value=freq;
+        gain.gain.setValueAtTime(0,ctx.currentTime+offset+i*.1);
+        gain.gain.linearRampToValueAtTime(.45,ctx.currentTime+offset+i*.1+.02);
+        gain.gain.setValueAtTime(.45,ctx.currentTime+offset+i*.1+.07);
+        gain.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+offset+i*.1+.15);
+        osc.start(ctx.currentTime+offset+i*.1);
+        osc.stop(ctx.currentTime+offset+i*.1+.18);
+      });
+    }
+  }catch(e){console.warn('Audio error:',e)}
+}
+// Rozpoznaj typ zamówienia i zagraj odpowiedni dźwięk
+function detectOrderType(items){
+  const hasPizza=items.some(i=>!i.type||i.type==='pizza'||i.type==='extra');
+  const hasBreakfast=items.some(i=>i.type==='breakfast');
+  if(hasPizza&&hasBreakfast) return 'mixed';
+  if(hasBreakfast) return 'breakfast';
+  return 'pizza';
+}
+function playOrderSound(orderType){
+  if(orderType==='breakfast') playBreakfastSound();
+  else if(orderType==='mixed') playMixedSound();
+  else playPizzaSound();
+}
+function showAlert(text, orderType){
   const el=document.getElementById('new-order-alert');document.getElementById('alert-text').textContent=text;
-  el.classList.add('show');setTimeout(()=>el.classList.remove('show'),5000);
-  playOrderSound();
+  el.classList.add('show');setTimeout(()=>el.classList.remove('show'),8000);
+  playOrderSound(orderType||'pizza');
 }
 
 // MODAL tel
@@ -516,15 +579,6 @@ function switchView(view,btn){
 // Start app
 // Ładuj Supabase dynamicznie, potem uruchom app
 initSlots();
-
-// AUTO-RESET o północy — przeładuj stronę na nowy dzień
-(function scheduleMidnightReset(){
-  const now=new Date();
-  const midnight=new Date(now.getFullYear(),now.getMonth(),now.getDate()+1,0,0,5);
-  const ms=midnight-now;
-  console.log('Auto-reset za',Math.round(ms/60000),'min (o północy)');
-  setTimeout(()=>{ location.reload(); }, ms);
-})();
 </script>
 </body>
 </html>
